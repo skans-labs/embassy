@@ -8,7 +8,9 @@ use core::sync::atomic::{Ordering, fence};
 pub(crate) use descriptors::{RDes, RDesInfo, TDes};
 use embassy_hal_internal::Peri;
 #[cfg(feature = "ptp")]
-pub use ptp::{PtpClock, PtpClockConfig, PtpSubsecondIncrement, PtpTimeProvider};
+pub use ptp::{
+    AuxiliarySnapshotInput, AuxiliarySnapshotStatus, PtpClock, PtpClockConfig, PtpSubsecondIncrement, PtpTimeProvider,
+};
 #[cfg(any(eth_v2, eth_v2b))]
 use stm32_metapac::syscfg::vals::EthSelPhy;
 

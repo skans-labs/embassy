@@ -60,12 +60,17 @@ impl PtpSubsecondIncrement {
 pub struct PtpClockConfig {
     /// Timestamp subsecond increment.
     pub subsecond_increment: PtpSubsecondIncrement,
+    /// Timestamp all received frames, including frames outside the PTP filters.
+    pub timestamp_all_rx_frames: bool,
 }
 
 impl PtpClockConfig {
     /// Create a PTP clock configuration with a custom subsecond increment.
     pub const fn new(subsecond_increment: PtpSubsecondIncrement) -> Self {
-        Self { subsecond_increment }
+        Self {
+            subsecond_increment,
+            timestamp_all_rx_frames: false,
+        }
     }
 }
 
@@ -73,6 +78,30 @@ impl Default for PtpClockConfig {
     fn default() -> Self {
         Self::new(PtpSubsecondIncrement::NANOS_8)
     }
+}
+
+/// A MAC auxiliary timestamp trigger input. Its source is chip-specific.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AuxiliarySnapshotInput {
+    /// Auxiliary trigger input 0.
+    Input0,
+    /// Auxiliary trigger input 1.
+    Input1,
+    /// Auxiliary trigger input 2.
+    Input2,
+    /// Auxiliary trigger input 3.
+    Input3,
+}
+
+/// Status of the MAC auxiliary timestamp FIFO before draining it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct AuxiliarySnapshotStatus {
+    /// Number of snapshots in the FIFO at the time of the status read.
+    pub queued: u8,
+    /// A trigger was missed because the FIFO was full.
+    pub overflow: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -147,7 +176,7 @@ impl<T: Instance> PtpClock<T> {
             rate,
             _peri: PhantomData,
         };
-        clock.configure();
+        clock.configure(config);
         clock.set_time(PtpTimestamp::default());
         debug!(
             "eth ptp clock hclk={} increment={}ns addend={:#010x}",
@@ -201,7 +230,33 @@ impl<T: Instance> PtpClock<T> {
         while mac.mactscr().read().tsaddreg() {}
     }
 
-    fn configure(&self) {
+    /// Enable or disable an auxiliary timestamp trigger input.
+    pub fn set_auxiliary_snapshot_input(&mut self, input: AuxiliarySnapshotInput, enabled: bool) {
+        T::regs()
+            .ethernet_mac()
+            .macacr()
+            .modify(|w| w.set_atsen(input as usize, enabled));
+    }
+
+    /// Read the status and drain the snapshots already in the auxiliary FIFO, oldest first.
+    /// Triggers arriving during the drain can be read on the next call.
+    pub fn read_auxiliary_snapshots(&mut self, mut read: impl FnMut(PtpTimestamp)) -> AuxiliarySnapshotStatus {
+        let mac = T::regs().ethernet_mac();
+        let status = mac.mactssr().read();
+        let queued = status.atsns();
+        for _ in 0..queued {
+            let nanos = mac.macatsnr().read().auxtslo();
+            // Reading the seconds register pops the FIFO entry.
+            let seconds = mac.macatssr().read().auxtshi();
+            read(PtpTimestamp::from_seconds_and_nanos(seconds, nanos));
+        }
+        AuxiliarySnapshotStatus {
+            queued,
+            overflow: status.atsstm(),
+        }
+    }
+
+    fn configure(&self, config: PtpClockConfig) {
         let mac = T::regs().ethernet_mac();
         mac.macier().modify(|w| w.set_tsie(false));
         mac.mactscr().modify(|w| w.set_tsena(false));
@@ -215,6 +270,7 @@ impl<T: Instance> PtpClock<T> {
             w.set_tsena(true);
             w.set_tscfupdt(true);
             w.set_tsctrlssr(true);
+            w.set_tsenall(config.timestamp_all_rx_frames);
             w.set_tsver2ena(true);
             w.set_tsipv4ena(true);
             w.set_tsipv6ena(true);

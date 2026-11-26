@@ -38,6 +38,7 @@ mod emac_consts {
     pub const EMAC_RDES1_PT_UDP: u32 = 1;
     pub const EMAC_RDES1_PT_TCP: u32 = 2;
     pub const EMAC_RDES1_TSA: u32 = 0x0000_4000; // timestamp available
+    pub const EMAC_RDES1_TD: u32 = 0x0000_8000; // timestamp dropped
 }
 use emac_consts::*;
 
@@ -156,7 +157,9 @@ impl RDesInfo {
 
     #[cfg(feature = "ptp")]
     pub(crate) const fn has_timestamp(&self) -> bool {
-        self.rdes3 & EMAC_RDES3_RS1V != 0 && self.rdes1 & EMAC_RDES1_TSA != 0
+        // STM32H743/753 erratum ES0392: the DMA can write an invalid context
+        // descriptor with both TSA and TD set. The ring skips that descriptor.
+        self.rdes3 & EMAC_RDES3_RS1V != 0 && self.rdes1 & (EMAC_RDES1_TSA | EMAC_RDES1_TD) == EMAC_RDES1_TSA
     }
 
     /// Return true if this RDes is not currently owned by the DMA
@@ -215,5 +218,22 @@ impl RDes {
         } else {
             None
         }
+    }
+}
+
+#[cfg(all(test, feature = "ptp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_dropped_rx_timestamp() {
+        let mut info = RDesInfo {
+            rdes0: 0,
+            rdes1: EMAC_RDES1_TSA,
+            rdes3: EMAC_RDES3_RS1V,
+        };
+        assert!(info.has_timestamp());
+        info.rdes1 |= EMAC_RDES1_TD;
+        assert!(!info.has_timestamp());
     }
 }
